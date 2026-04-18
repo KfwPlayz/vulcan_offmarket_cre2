@@ -295,6 +295,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
             listing_agent: "", listing_office: "",
             zillow_link: "", google_maps_link: "",
             facebook: "", instagram: "", linkedin: "", twitter: "", tiktok: "", youtube: "",
+
             phone_1: "", phone_2: "", phone_3: "", phone_4: "", phone_5: ""
           },
           detailData
@@ -323,10 +324,6 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
         console.error(`❌ Failed to send ${lead.full_name}: ${err.message}`);
       }
     }
-
-    // // 💾 Save updated cache
-    // const updatedCache = [...sentCache, ...newKeys];
-    // fs.writeFileSync(CACHE_FILE, JSON.stringify(updatedCache, null, 2));
 
     // 📁 Check/create folder
     await page.goto(CONTACTS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
@@ -366,76 +363,109 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
       console.log(`✅ Folder "${folderName}" already exists — skipping creation.`);
     }
 
-    // 📂 Move contacts (robust)
+    // 📂 Move contacts
     await page.goto(CONTACTS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
     await page.waitForSelector("#master_checkbox", { visible: true, timeout: 120000 });
-    await page.click("#master_checkbox");
-    console.log("✅ Selected all contacts via master checkbox.");
+    await sleep(1500);
 
-    // Click the Move button
-    await page.waitForSelector("#cm_move_button", { visible: true, timeout: 120000 });
-    await page.click("#cm_move_button");
-    await sleep(800);
-
-    // Wait for either the dropdown container OR the folder items to exist
-    const menuShown = await page.waitForFunction(() => {
-      return !!document.querySelector("#cm_move_dropdown") ||
-        document.querySelectorAll("li.move-contacts-folder[title]").length > 0 ||
-        document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li").length > 0;
-    }, { timeout: 10000 }).catch(() => false);
-
-    // If not shown, try clicking again once
-    if (!menuShown) {
-      console.log("↻ Move menu not detected, retrying click…");
-      await page.click("#cm_move_button");
-      await sleep(1200);
+    // Select all contacts
+    const alreadyChecked = await page.$eval("#master_checkbox", el => !!el.checked).catch(() => false);
+    if (!alreadyChecked) {
+      await page.click("#master_checkbox");
+      await sleep(1000);
     }
 
-    // Log what we see for debugging
-    const menuDebug = await page.evaluate(() => ({
-      hasDropdown: !!document.querySelector("#cm_move_dropdown"),
-      itemsByTitle: document.querySelectorAll("li.move-contacts-folder[title]").length,
-      anyLis: document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li").length
-    }));
-    console.log("ℹ️ Move menu debug:", JSON.stringify(menuDebug));
+    const isChecked = await page.$eval("#master_checkbox", el => !!el.checked).catch(() => false);
+    if (!isChecked) {
+      throw new Error("Master checkbox was not checked.");
+    }
 
-    // Try to click the target folder in a broad way
-    const moveSuccess = await page.evaluate((targetFolderName) => {
+    console.log("✅ Selected all contacts via master checkbox.");
+
+    // Open move menu
+    await page.waitForSelector("#cm_move_button", { visible: true, timeout: 120000 });
+    await page.click("#cm_move_button");
+    await sleep(1500);
+
+    // Wait for dropdown items
+    await page.waitForFunction(() => {
+      return document.querySelectorAll("li.move-contacts-folder[title]").length > 0 ||
+             document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li").length > 0;
+    }, { timeout: 10000 });
+
+    // Click exact folder entry
+    const clickedFolder = await page.evaluate((targetFolderName) => {
+      const normalize = (s) => (s || "").replace(/\s+/g, " ").trim();
+
       let items = Array.from(document.querySelectorAll("li.move-contacts-folder[title]"));
       if (!items.length) {
-        items = Array.from(document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li, li"));
+        items = Array.from(document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li"));
       }
+
       for (const item of items) {
-        const title = (item.getAttribute("title") || item.textContent || "").trim();
-        if (title === targetFolderName.trim()) {
-          const link = item.querySelector("a.move-to-folder") || item.querySelector("a, .dropdown-item, button");
-          if (link) {
-            link.click();
-            return true;
-          }
+        const title = normalize(item.getAttribute("title") || item.textContent || "");
+        if (title === normalize(targetFolderName)) {
+          const link =
+            item.querySelector("a.move-to-folder") ||
+            item.querySelector("a") ||
+            item;
+
+          link.scrollIntoView({ block: "center" });
+          link.click();
+          return true;
         }
       }
+
       return false;
     }, folderName);
 
-    // Confirm modal if it appears
-    try {
-      await page.waitForSelector("#bulk_actions_modal button.btn.btn-primary", { visible: true, timeout: 5000 });
-      await page.click("#bulk_actions_modal button.btn.btn-primary");
-      console.log("🟢 Confirmed move modal.");
-    } catch {
-      console.warn("⚠️ 'Okay' button did not appear after move.");
+    if (!clickedFolder) {
+      throw new Error(`Could not find move folder: ${folderName}`);
     }
 
-    if (moveSuccess) {
-      console.log(`✅ Move to folder "${folderName}" triggered`);
-      await sleep(3000);
-    } else {
-      console.error(`❌ Could not find move folder: ${folderName}`);
-      try {
-        await page.screenshot({ path: "failure_move.png", fullPage: true });
-      } catch {}
+    console.log(`✅ Clicked folder "${folderName}" in move menu.`);
+    await sleep(1500);
+
+    // Confirm modal if it appears
+    try {
+      await page.waitForSelector("#bulk_actions_modal", { visible: true, timeout: 5000 });
+
+      const confirmed = await page.evaluate(() => {
+        const modal = document.querySelector("#bulk_actions_modal");
+        if (!modal) return false;
+
+        const buttons = Array.from(modal.querySelectorAll("button"));
+        const btn = buttons.find(b =>
+          /okay|ok|move|confirm/i.test((b.textContent || "").trim())
+        );
+
+        if (btn) {
+          btn.click();
+          return true;
+        }
+
+        const primary = modal.querySelector("button.btn.btn-primary");
+        if (primary) {
+          primary.click();
+          return true;
+        }
+
+        return false;
+      });
+
+      if (confirmed) {
+        console.log("🟢 Confirmed move modal.");
+        await sleep(3000);
+      } else {
+        console.warn("⚠️ Move modal appeared, but confirm button was not found.");
+      }
+    } catch {
+      console.log("ℹ️ No confirmation modal appeared.");
     }
+
+    // Give Vulcan7 time to process
+    await sleep(4000);
+    console.log(`✅ Move attempt finished for folder "${folderName}"`);
 
   } catch (err) {
     console.error("❌ Script Error:", err);
