@@ -14,7 +14,7 @@ const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
 const EMAIL = process.env.EMAIL;
 const PASSWORD = process.env.PASSWORD;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
-//const CACHE_FILE = path.join(__dirname, "sent-leads-cache-offmarket.json");
+// const CACHE_FILE = path.join(__dirname, "sent-leads-cache-offmarket.json");
 
 // 📅 Folder name = Monday of current week
 const today = new Date();
@@ -49,15 +49,15 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
   await page.setViewport({ width: 1366, height: 768 });
 
   await page.setRequestInterception(true);
-  page.on("request", req => {
+  page.on("request", (req) => {
     const type = req.resourceType();
     if (type === "image" || type === "font" || type === "media") req.abort();
     else req.continue();
   });
 
-  page.on("console", msg => console.log("[BROWSER]", msg.type(), msg.text()));
-  page.on("pageerror", err => console.log("[PAGEERROR]", err));
-  page.on("requestfailed", req => console.log("[REQ FAILED]", req.url(), req.failure()?.errorText));
+  page.on("console", (msg) => console.log("[BROWSER]", msg.type(), msg.text()));
+  page.on("pageerror", (err) => console.log("[PAGEERROR]", err));
+  page.on("requestfailed", (req) => console.log("[REQ FAILED]", req.url(), req.failure()?.errorText));
   // === end CI hardening ===
 
   try {
@@ -66,13 +66,18 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
     await page.waitForSelector('input[name="email"], #email, input[name="username"]', { timeout: 120000 });
     await page.waitForSelector('input[name="password"], #password', { timeout: 120000 });
 
-    const emailSel = (await page.$('input[name="email"]')) ? 'input[name="email"]'
-                     : (await page.$('#email')) ? '#email'
-                     : 'input[name="username"]';
-    const passSel  = (await page.$('input[name="password"]')) ? 'input[name="password"]' : '#password';
+    const emailSel = (await page.$('input[name="email"]'))
+      ? 'input[name="email"]'
+      : (await page.$('#email'))
+        ? '#email'
+        : 'input[name="username"]';
+
+    const passSel = (await page.$('input[name="password"]'))
+      ? 'input[name="password"]'
+      : '#password';
 
     await page.type(emailSel, EMAIL, { delay: 20 });
-    await page.type(passSel,  PASSWORD, { delay: 20 });
+    await page.type(passSel, PASSWORD, { delay: 20 });
 
     await Promise.all([
       page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 120000 }),
@@ -117,7 +122,10 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
     console.log(`✅ Found ${leads.length} raw leads in "Off Market"`);
 
     // 📥 Deduplication
-    const seen = new Set(), filtered = [], dupes = [];
+    const seen = new Set();
+    const filtered = [];
+    const dupes = [];
+
     for (const lead of leads) {
       const key = `${lead.full_name}|${lead.phone}`;
       if (lead.full_name.toLowerCase() === "possible owner" || !seen.has(key)) {
@@ -133,7 +141,9 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
     // if (fs.existsSync(CACHE_FILE)) {
     //   try {
     //     sentCache = new Set(JSON.parse(fs.readFileSync(CACHE_FILE, "utf-8")));
-    //   } catch { /* ignore bad cache */ }
+    //   } catch {
+    //     // ignore bad cache
+    //   }
     // }
 
     // const unsentLeads = [], newKeys = [];
@@ -144,121 +154,165 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
     //     newKeys.push(key);
     //   }
     // }
+
     const unsentLeads = filtered;
 
     for (const lead of unsentLeads) {
-  const detailPage = await browser.newPage();
-  try {
-    const detailUrl = `https://www.vulcan7dialer.com/cm/index#contact/${lead.contact_id}`;
-    await detailPage.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
+      const detailPage = await browser.newPage();
 
-    await detailPage.waitForFunction(() => {
-      const ths = Array.from(document.querySelectorAll("th"));
-      return ths.some(th => th.textContent.includes("MLS Number"));
-    }, { timeout: 15000 });
+      try {
+        const detailUrl = `https://www.vulcan7dialer.com/cm/index#contact/${lead.contact_id}`;
+        await detailPage.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
 
-    const detailData = await detailPage.evaluate(() => {
-      const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
+        await detailPage.waitForFunction(() => {
+          const ths = Array.from(document.querySelectorAll("th"));
+          return ths.some((th) => th.textContent.includes("MLS Number"));
+        }, { timeout: 15000 });
 
-      const getTextAfterTh = (label) => {
-        const ths = Array.from(document.querySelectorAll("tr th"));
-        for (const th of ths) {
-          const thText = clean(th.textContent || "").toLowerCase();
-          if (thText.includes(label.toLowerCase().replace(":", ""))) {
-            const td = th.nextElementSibling;
-            return td ? clean(td.textContent) : "";
-          }
-        }
-        return "";
-      };
+        const detailData = await detailPage.evaluate(() => {
+          const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
 
-      const getBedsAndBaths = () => {
-        const val = getTextAfterTh("Beds");
-        const [bedsRaw, bathsRaw] = val.split("/").map(v => clean(v));
-        return {
-          beds: bedsRaw || "",
-          baths: bathsRaw || ""
-        };
-      };
-
-      // Address object
-      let address = { street: "", city: "", state: "", zip: "" };
-      const addrEl = document.querySelector('a[data-type="address"]');
-      if (addrEl) {
-        try {
-          const data = JSON.parse(addrEl.getAttribute("data-value") || "{}");
-          address = {
-            street: data.address || "",
-            city: data.city || "",
-            state: data.state || "",
-            zip: data.zip || ""
+          const getTextAfterTh = (label) => {
+            const ths = Array.from(document.querySelectorAll("tr th"));
+            for (const th of ths) {
+              const thText = clean(th.textContent || "").toLowerCase();
+              if (thText.includes(label.toLowerCase().replace(":", ""))) {
+                const td = th.nextElementSibling;
+                return td ? clean(td.textContent) : "";
+              }
+            }
+            return "";
           };
+
+          const getBedsAndBaths = () => {
+            const val = getTextAfterTh("Beds");
+            const [bedsRaw, bathsRaw] = val.split("/").map((v) => clean(v));
+            return {
+              beds: bedsRaw || "",
+              baths: bathsRaw || ""
+            };
+          };
+
+          const getPhones = () => {
+            const phoneLinks = Array.from(
+              document.querySelectorAll('tbody[data-section="phones"] a[data-type="phone"]')
+            ).slice(0, 5);
+
+            const phones = [];
+
+            for (let i = 0; i < 5; i++) {
+              const el = phoneLinks[i];
+
+              if (!el) {
+                phones.push("");
+                continue;
+              }
+
+              let parsed = {};
+              try {
+                parsed = JSON.parse(el.getAttribute("data-value") || "{}");
+              } catch {}
+
+              const rawText = (el.textContent || "").trim();
+              const cleanNumber = rawText
+                .replace(/\((Home|Work|Mobile|Fax|Other)\)/gi, "")
+                .trim();
+
+              phones.push(parsed.phone || parsed.raw_phone || cleanNumber);
+            }
+
+            return phones;
+          };
+
+          // Address object
+          let address = { street: "", city: "", state: "", zip: "" };
+          const addrEl = document.querySelector('a[data-type="address"]');
+          if (addrEl) {
+            try {
+              const data = JSON.parse(addrEl.getAttribute("data-value") || "{}");
+              address = {
+                street: data.address || "",
+                city: data.city || "",
+                state: data.state || "",
+                zip: data.zip || ""
+              };
+            } catch {}
+          }
+
+          // Link grabber
+          const links = Array.from(document.querySelectorAll("a[href]")).map((a) => a.getAttribute("href"));
+
+          const matchLink = (pattern) => {
+            const regex = new RegExp(pattern, "i");
+            return links.find((href) => regex.test(href)) || "";
+          };
+
+          const zillowRelative = links.find((h) => h.includes("/zillow/go_to_site")) || "";
+          const zillowLink = zillowRelative ? `https://www.vulcan7dialer.com${zillowRelative}` : "";
+
+          const { beds, baths } = getBedsAndBaths();
+          const phones = getPhones();
+
+          return {
+            street: address.street,
+            city: address.city,
+            state: address.state,
+            zip: address.zip,
+            mls_number: getTextAfterTh("MLS Number"),
+            property_type: getTextAfterTh("Property Type"),
+            mls_status: getTextAfterTh("MLS Status"),
+            status_change_date: getTextAfterTh("Status Change Date"),
+            list_price: getTextAfterTh("List Price"),
+            beds,
+            baths,
+            square_footage: getTextAfterTh("Square Footage"),
+            days_on_market: getTextAfterTh("Days On Market"),
+            listing_agent: getTextAfterTh("Listing Agent"),
+            listing_office: getTextAfterTh("Listing Office"),
+            zillow_link: zillowLink,
+            google_maps_link: matchLink("google\\.(com|ca)/maps|maps\\.google"),
+            facebook: matchLink("facebook\\.com"),
+            instagram: matchLink("instagram\\.com"),
+            linkedin: matchLink("linkedin\\.com"),
+            twitter: matchLink("twitter\\.com"),
+            tiktok: matchLink("tiktok\\.com"),
+            youtube: matchLink("youtube\\.com"),
+
+            phone_1: phones[0],
+            phone_2: phones[1],
+            phone_3: phones[2],
+            phone_4: phones[3],
+            phone_5: phones[4]
+          };
+        });
+
+        Object.assign(
+          lead,
+          {
+            street: "", city: "", state: "", zip: "",
+            mls_number: "", property_type: "", mls_status: "", status_change_date: "", list_price: "",
+            beds: "", baths: "", square_footage: "", days_on_market: "",
+            listing_agent: "", listing_office: "",
+            zillow_link: "", google_maps_link: "",
+            facebook: "", instagram: "", linkedin: "", twitter: "", tiktok: "", youtube: "",
+            phone_1: "", phone_2: "", phone_3: "", phone_4: "", phone_5: ""
+          },
+          detailData
+        );
+
+        // Make "phone" match phone_1 from the detail page
+        lead.phone = detailData.phone_1 || "";
+
+      } catch (err) {
+        console.error(`⚠️ Detail fetch failed for ${lead.full_name}: ${err.message}`);
+        try {
+          await detailPage.screenshot({ path: `failure_${lead.contact_id}.png`, fullPage: true });
         } catch {}
+      } finally {
+        await detailPage.close();
+        await sleep(300);
       }
-
-      // Link grabber
-      const links = Array.from(document.querySelectorAll("a[href]")).map(a => a.getAttribute("href"));
-
-      const matchLink = (pattern) => {
-        const regex = new RegExp(pattern, "i");
-        return links.find(href => regex.test(href)) || "";
-      };
-
-      const zillowRelative = links.find(h => h.includes("/zillow/go_to_site")) || "";
-      const zillowLink = zillowRelative ? `https://www.vulcan7dialer.com${zillowRelative}` : "";
-
-      const { beds, baths } = getBedsAndBaths();
-
-      return {
-        street: address.street,
-        city: address.city,
-        state: address.state,
-        zip: address.zip,
-        mls_number: getTextAfterTh("MLS Number"),
-        property_type: getTextAfterTh("Property Type"),
-        mls_status: getTextAfterTh("MLS Status"),
-        status_change_date: getTextAfterTh("Status Change Date"),
-        list_price: getTextAfterTh("List Price"),
-        beds,
-        baths,
-        square_footage: getTextAfterTh("Square Footage"),
-        days_on_market: getTextAfterTh("Days On Market"),
-        listing_agent: getTextAfterTh("Listing Agent"),
-        listing_office: getTextAfterTh("Listing Office"),
-        zillow_link: zillowLink,
-        google_maps_link: matchLink("google\\.(com|ca)/maps|maps\\.google"),
-        facebook: matchLink("facebook\\.com"),
-        instagram: matchLink("instagram\\.com"),
-        linkedin: matchLink("linkedin\\.com"),
-        twitter: matchLink("twitter\\.com"),
-        tiktok: matchLink("tiktok\\.com"),
-        youtube: matchLink("youtube\\.com")
-      };
-    });
-
-    Object.assign(
-      lead,
-      {
-        street: "", city: "", state: "", zip: "",
-        mls_number: "", property_type: "", mls_status: "", status_change_date: "", list_price: "",
-        beds: "", baths: "", square_footage: "", days_on_market: "",
-        listing_agent: "", listing_office: "",
-        zillow_link: "", google_maps_link: "",
-        facebook: "", instagram: "", linkedin: "", twitter: "", tiktok: "", youtube: ""
-      },
-      detailData
-    );
-
-  } catch (err) {
-    console.error(`⚠️ Detail fetch failed for ${lead.full_name}: ${err.message}`);
-    try {
-      await detailPage.screenshot({ path: `failure_${lead.contact_id}.png`, fullPage: true });
-    } catch {}
-  } finally {
-    await detailPage.close();
-    await sleep(300);
-  }
-}
+    }
 
     // 📤 Send to Zapier
     for (const lead of unsentLeads) {
@@ -281,7 +335,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
     const normalizedName = folderName.replace(/\s+/g, "-");
     const folderExists = await page.evaluate((dataFolderName) => {
       const folders = [...document.querySelectorAll("div.contacts-folder-nav-name")];
-      return folders.some(f => f.getAttribute("data-folder-name") === dataFolderName);
+      return folders.some((f) => f.getAttribute("data-folder-name") === dataFolderName);
     }, normalizedName);
 
     if (!folderExists) {
@@ -298,7 +352,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
           await page.waitForSelector("div[role='option']", { timeout: 10000 });
           await page.evaluate(() => {
             const option = [...document.querySelectorAll("div[role='option']")]
-              .find(el => el.textContent.trim() === "Off Market");
+              .find((el) => el.textContent.trim() === "Off Market");
             option?.click();
           });
         } catch {}
@@ -326,8 +380,8 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
     // Wait for either the dropdown container OR the folder items to exist
     const menuShown = await page.waitForFunction(() => {
       return !!document.querySelector("#cm_move_dropdown") ||
-             document.querySelectorAll("li.move-contacts-folder[title]").length > 0 ||
-             document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li").length > 0;
+        document.querySelectorAll("li.move-contacts-folder[title]").length > 0 ||
+        document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li").length > 0;
     }, { timeout: 10000 }).catch(() => false);
 
     // If not shown, try clicking again once
@@ -346,16 +400,19 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
     console.log("ℹ️ Move menu debug:", JSON.stringify(menuDebug));
 
     // Try to click the target folder in a broad way
-    const moveSuccess = await page.evaluate((folderName) => {
+    const moveSuccess = await page.evaluate((targetFolderName) => {
       let items = Array.from(document.querySelectorAll("li.move-contacts-folder[title]"));
       if (!items.length) {
         items = Array.from(document.querySelectorAll("#cm_move_dropdown li, .dropdown-menu li, li"));
       }
       for (const item of items) {
         const title = (item.getAttribute("title") || item.textContent || "").trim();
-        if (title === folderName.trim()) {
+        if (title === targetFolderName.trim()) {
           const link = item.querySelector("a.move-to-folder") || item.querySelector("a, .dropdown-item, button");
-          if (link) { link.click(); return true; }
+          if (link) {
+            link.click();
+            return true;
+          }
         }
       }
       return false;
@@ -375,12 +432,16 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
       await sleep(3000);
     } else {
       console.error(`❌ Could not find move folder: ${folderName}`);
-      try { await page.screenshot({ path: "failure_move.png", fullPage: true }); } catch {}
+      try {
+        await page.screenshot({ path: "failure_move.png", fullPage: true });
+      } catch {}
     }
 
   } catch (err) {
     console.error("❌ Script Error:", err);
-    try { await page.screenshot({ path: "failure.png", fullPage: true }); } catch {}
+    try {
+      await page.screenshot({ path: "failure.png", fullPage: true });
+    } catch {}
     process.exitCode = 1;
   } finally {
     await browser.close();
