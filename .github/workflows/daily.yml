@@ -2,6 +2,8 @@ name: Daily Vulcan7 FSBO Job
 
 on:
   schedule:
+    - cron: "10 11 * * *"   # 9:10 AM ET during DST (UTC-4)
+    - cron: "10 12 * * *"   # 9:10 AM ET during Standard Time (UTC-5)
   workflow_dispatch:
     inputs:
       force:
