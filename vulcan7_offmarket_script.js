@@ -366,8 +366,9 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
 
     // 📂 Move contacts
     await page.goto(CONTACTS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
-    await page.waitForSelector("#master_checkbox", { visible: true, timeout: 120000 });
-    await sleep(1500);
+    await page.waitForSelector("tr[data-itemid]", { timeout: 120000 });
+    await page.waitForSelector("#master_checkbox", { timeout: 120000 });
+    await sleep(5000);
 
     // Select all contacts
     const alreadyChecked = await page.$eval("#master_checkbox", el => !!el.checked).catch(() => false);
