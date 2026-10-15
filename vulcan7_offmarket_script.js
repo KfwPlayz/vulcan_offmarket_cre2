@@ -1,28 +1,61 @@
-// 📌 Required Libraries
+// Vulcan7 lead sync
+// Scrapes contacts from a Vulcan7 view, sends each one to a webhook, and optionally
+// moves them into a folder. Everything that differs between accounts or lists
+// (view URL, folder name, move on/off, cell IDs) comes from environment variables
+// set in the workflow file, so every account runs this exact same script.
+
 const puppeteer = require("puppeteer");
 const axios = require("axios");
-const fs = require("fs");
-const path = require("path");
 
-// Small helper that works on every Node/Puppeteer version
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// 🔐 Credentials and Constants
+// ---------- Config ----------
 const LOGIN_URL = "https://www.vulcan7dialer.com/login";
-const CONTACTS_URL = "https://www.vulcan7dialer.com/cm/index#params/dmlld19pZD05ODEzOCZwYWdlPTE=";
 const FOLDER_URL = "https://www.vulcan7dialer.com/cm/folders/index";
+
 const EMAIL = process.env.EMAIL;
 const PASSWORD = process.env.PASSWORD;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
-// const CACHE_FILE = path.join(__dirname, "sent-leads-cache-offmarket.json");
+const CONTACTS_URL = process.env.CONTACTS_URL ||
+  "https://www.vulcan7dialer.com/cm/index#params/dmlld19pZD05ODEzOCZwYWdlPTE=";
 
-// 📅 Folder name = Monday of current week
-const today = new Date();
-const day = today.getDay();
-const offset = (day === 0) ? -6 : 1 - day;
-const monday = new Date(today);
-monday.setDate(today.getDate() + offset);
-const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getDate()}`;
+const MOVE_CONTACTS = (process.env.MOVE_CONTACTS || "true").toLowerCase() === "true";
+const FOLDER_PARENT = process.env.FOLDER_PARENT || "Off Market"; // parent folder picked in the create-folder form
+const FOLDER_LAYOUT = process.env.FOLDER_LAYOUT || "8109";
+const PHONE_CELL_ID = process.env.PHONE_CELL_ID || "143332"; // account specific column ids
+const EMAIL_CELL_ID = process.env.EMAIL_CELL_ID || "143333";
+const LIST_LABEL = process.env.LIST_LABEL || "Off Market"; // only used in log lines
+const DEBUG_FIELDS = process.env.DEBUG_FIELDS === "1"; // dump labels + phone markup for the first lead
+
+if (!EMAIL || !PASSWORD || !WEBHOOK_URL) {
+  console.error("Missing config. EMAIL, PASSWORD and WEBHOOK_URL must all be set.");
+  process.exit(1);
+}
+
+// Folder name. Use {MONDAY} for the Monday of the current week, e.g.
+// "Expired Leads Week of {MONDAY}" becomes "Expired Leads Week of 10.12".
+const monday = new Date();
+monday.setDate(monday.getDate() + (monday.getDay() === 0 ? -6 : 1 - monday.getDay()));
+const mondayLabel = `${monday.getMonth() + 1}.${monday.getDate()}`;
+const folderName = (process.env.FOLDER_NAME || "Expired Leads Week of {MONDAY}").replace("{MONDAY}", mondayLabel);
+
+// Every field the webhook expects, so a lead whose detail page fails still has all keys
+const DEFAULT_DETAIL = {
+  street: "", city: "", state: "", zip: "",
+  mls_number: "", property_type: "", mls_status: "", status_change_date: "", list_price: "",
+  beds: "", baths: "", square_footage: "", days_on_market: "",
+  listing_agent: "", listing_office: "",
+  zillow_link: "", google_maps_link: "",
+  facebook: "", instagram: "", linkedin: "", twitter: "", tiktok: "", youtube: "",
+
+  owner_2_first_name: "", owner_2_last_name: "",
+
+  phone_1: "", phone_1_dnc: "",
+  phone_2: "", phone_2_dnc: "",
+  phone_3: "", phone_3_dnc: "",
+  phone_4: "", phone_4_dnc: "",
+  phone_5: "", phone_5_dnc: ""
+};
 
 (async () => {
   const browser = await puppeteer.launch({
@@ -62,20 +95,20 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
   // === end CI hardening ===
 
   try {
-    // 🔐 Log in to Vulcan7
+    // ---------- Log in ----------
     await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
     await page.waitForSelector('input[name="email"], #email, input[name="username"]', { timeout: 120000 });
     await page.waitForSelector('input[name="password"], #password', { timeout: 120000 });
 
     const emailSel = (await page.$('input[name="email"]'))
       ? 'input[name="email"]'
-      : (await page.$('#email'))
-        ? '#email'
+      : (await page.$("#email"))
+        ? "#email"
         : 'input[name="username"]';
 
     const passSel = (await page.$('input[name="password"]'))
       ? 'input[name="password"]'
-      : '#password';
+      : "#password";
 
     await page.type(emailSel, EMAIL, { delay: 20 });
     await page.type(passSel, PASSWORD, { delay: 20 });
@@ -85,14 +118,14 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
       page.click('button[type="submit"], .login-button')
     ]);
 
-    // ✅ Scrape contacts from Off Market folder
+    // ---------- Scrape the contact list ----------
     await page.goto(CONTACTS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
     await page.waitForSelector("tr[data-itemid]", { timeout: 120000 });
     await sleep(1500);
 
-    const leads = await page.evaluate(() => {
+    const leads = await page.evaluate(({ phoneCell, emailCell }) => {
       const rows = document.querySelectorAll("tr[data-itemid]");
-      const leads = [];
+      const out = [];
 
       for (const row of rows) {
         const id = row.getAttribute("data-itemid");
@@ -100,14 +133,14 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
         const fullName = nameEl?.innerText?.trim();
         if (!fullName) continue;
 
-        const phoneDiv = document.querySelector(`div[id='cell-example-${id}-143332']`);
+        const phoneDiv = document.querySelector(`div[id='cell-example-${id}-${phoneCell}']`);
         const phone = phoneDiv?.innerText?.trim() || "";
 
-        const emailEl = document.querySelector(`div[id='cell-example-${id}-143333'] a[href^='mailto:']`);
+        const emailEl = document.querySelector(`div[id='cell-example-${id}-${emailCell}'] a[href^='mailto:']`);
         const email = emailEl?.getAttribute("href")?.replace("mailto:", "").trim() || "";
 
         const nameParts = fullName.split(" ");
-        leads.push({
+        out.push({
           full_name: fullName,
           first_name: nameParts[0] || "",
           last_name: nameParts.slice(1).join(" "),
@@ -117,48 +150,29 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
         });
       }
 
-      return leads;
-    });
+      return out;
+    }, { phoneCell: PHONE_CELL_ID, emailCell: EMAIL_CELL_ID });
 
-    console.log(`✅ Found ${leads.length} raw leads in "Off Market"`);
+    console.log(`✅ Found ${leads.length} raw leads in "${LIST_LABEL}"`);
 
-    // 📥 Deduplication
+    // ---------- De-duplicate ----------
     const seen = new Set();
-    const filtered = [];
-    const dupes = [];
+    const unsentLeads = [];
 
     for (const lead of leads) {
       const key = `${lead.full_name}|${lead.phone}`;
       if (lead.full_name.toLowerCase() === "possible owner" || !seen.has(key)) {
         seen.add(key);
-        filtered.push(lead);
-      } else {
-        dupes.push(lead);
+        unsentLeads.push(lead);
       }
     }
 
-    // // 🧠 Load cache
-    // let sentCache = new Set();
-    // if (fs.existsSync(CACHE_FILE)) {
-    //   try {
-    //     sentCache = new Set(JSON.parse(fs.readFileSync(CACHE_FILE, "utf-8")));
-    //   } catch {
-    //     // ignore bad cache
-    //   }
-    // }
-
-    // const unsentLeads = [], newKeys = [];
-    // for (const lead of filtered) {
-    //   const key = `${lead.full_name}|${lead.phone}`;
-    //   if (!sentCache.has(key)) {
-    //     unsentLeads.push(lead);
-    //     newKeys.push(key);
-    //   }
-    // }
-
-    const unsentLeads = filtered;
+    // ---------- Pull details for each lead ----------
+    let debugPrinted = false;
 
     for (const lead of unsentLeads) {
+      Object.assign(lead, DEFAULT_DETAIL);
+
       const detailPage = await browser.newPage();
 
       try {
@@ -169,6 +183,19 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
           const ths = Array.from(document.querySelectorAll("th"));
           return ths.some((th) => th.textContent.includes("MLS Number"));
         }, { timeout: 15000 });
+
+        // Optional: dump labels + phone markup once so selectors can be confirmed
+        if (DEBUG_FIELDS && !debugPrinted) {
+          debugPrinted = true;
+          const dump = await detailPage.evaluate(() => ({
+            labels: Array.from(document.querySelectorAll("tr th")).map((th) =>
+              (th.textContent || "").replace(/\s+/g, " ").trim()
+            ),
+            phonesHtml: document.querySelector('tbody[data-section="phones"]')?.outerHTML || "(no phones section)"
+          }));
+          console.log("🐞 Detail labels:", JSON.stringify(dump.labels));
+          console.log("🐞 Phones HTML:", dump.phonesHtml);
+        }
 
         const detailData = await detailPage.evaluate(() => {
           const clean = (t) => (t || "").replace(/\s+/g, " ").trim();
@@ -188,10 +215,48 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
           const getBedsAndBaths = () => {
             const val = getTextAfterTh("Beds");
             const [bedsRaw, bathsRaw] = val.split("/").map((v) => clean(v));
-            return {
-              beds: bedsRaw || "",
-              baths: bathsRaw || ""
-            };
+            return { beds: bedsRaw || "", baths: bathsRaw || "" };
+          };
+
+          // Owner 2 = the second name listed under "Name" (the one that is not #primary_name)
+          const getOwner2 = () => {
+            const el = document.querySelector(
+              'tbody[data-section="names"] a[data-type="fullname"]:not(#primary_name)'
+            );
+            if (!el) return { first: "", last: "" };
+
+            let parsed = {};
+            try {
+              parsed = JSON.parse(el.getAttribute("data-value") || "{}");
+            } catch {}
+
+            let first = clean(parsed.first_name);
+            let last = clean(parsed.last_name);
+
+            // Fallback: split the visible text like the main name
+            if (!first && !last) {
+              const parts = clean(el.textContent).split(" ");
+              first = parts[0] || "";
+              last = parts.slice(1).join(" ");
+            }
+
+            return { first, last };
+          };
+
+          // DNC check for one phone link: "DNC" if flagged, "" if not
+          const getDncStatus = (el, parsed) => {
+            // National DNC: Vulcan7 adds the "national_dnc" class to the number link
+            if (el.classList.contains("national_dnc")) return "DNC";
+
+            // National DNC: "DNC" label next to the number in the same cell
+            const cell = el.closest("td");
+            const labels = cell ? Array.from(cell.querySelectorAll("span.label")) : [];
+            if (labels.some((s) => clean(s.textContent).toUpperCase() === "DNC")) return "DNC";
+
+            // Internal DNC / blacklist flag in the number's data
+            if (parsed.do_not_call === true || parsed.do_not_call === "1" || parsed.do_not_call === 1) return "DNC";
+
+            return "";
           };
 
           const getPhones = () => {
@@ -200,12 +265,14 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
             ).slice(0, 5);
 
             const phones = [];
+            const dnc = [];
 
             for (let i = 0; i < 5; i++) {
               const el = phoneLinks[i];
 
               if (!el) {
                 phones.push("");
+                dnc.push("");
                 continue;
               }
 
@@ -220,9 +287,10 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
                 .trim();
 
               phones.push(parsed.phone || parsed.raw_phone || cleanNumber);
+              dnc.push(getDncStatus(el, parsed));
             }
 
-            return phones;
+            return { phones, dnc };
           };
 
           // Address object
@@ -252,7 +320,8 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
           const zillowLink = zillowRelative ? `https://www.vulcan7dialer.com${zillowRelative}` : "";
 
           const { beds, baths } = getBedsAndBaths();
-          const phones = getPhones();
+          const { phones, dnc } = getPhones();
+          const owner2 = getOwner2();
 
           return {
             street: address.street,
@@ -279,32 +348,26 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
             tiktok: matchLink("tiktok\\.com"),
             youtube: matchLink("youtube\\.com"),
 
+            owner_2_first_name: owner2.first,
+            owner_2_last_name: owner2.last,
+
             phone_1: phones[0],
+            phone_1_dnc: dnc[0],
             phone_2: phones[1],
+            phone_2_dnc: dnc[1],
             phone_3: phones[2],
+            phone_3_dnc: dnc[2],
             phone_4: phones[3],
-            phone_5: phones[4]
+            phone_4_dnc: dnc[3],
+            phone_5: phones[4],
+            phone_5_dnc: dnc[4]
           };
         });
 
-        Object.assign(
-          lead,
-          {
-            street: "", city: "", state: "", zip: "",
-            mls_number: "", property_type: "", mls_status: "", status_change_date: "", list_price: "",
-            beds: "", baths: "", square_footage: "", days_on_market: "",
-            listing_agent: "", listing_office: "",
-            zillow_link: "", google_maps_link: "",
-            facebook: "", instagram: "", linkedin: "", twitter: "", tiktok: "", youtube: "",
-
-            phone_1: "", phone_2: "", phone_3: "", phone_4: "", phone_5: ""
-          },
-          detailData
-        );
+        Object.assign(lead, detailData);
 
         // Make "phone" match phone_1 from the detail page
-        lead.phone = detailData.phone_1 || "";
-
+        lead.phone = detailData.phone_1 || lead.phone;
       } catch (err) {
         console.error(`⚠️ Detail fetch failed for ${lead.full_name}: ${err.message}`);
         try {
@@ -316,17 +379,49 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
       }
     }
 
-    // 📤 Send to Zapier
+    // ---------- Send to webhook ----------
+    // Retries each lead up to 3 times. A 404/410 means the webhook is dead, so stop
+    // right away. Any lead that still fails stops the run before the move step, so
+    // nothing gets moved out of the list unless it was delivered.
+    const failedLeads = [];
+
     for (const lead of unsentLeads) {
-      try {
-        await axios.post(WEBHOOK_URL, { timestamp: new Date().toISOString(), lead });
-        console.log(`📤 Sent: ${lead.full_name}`);
-      } catch (err) {
-        console.error(`❌ Failed to send ${lead.full_name}: ${err.message}`);
+      let ok = false;
+
+      for (let attempt = 1; attempt <= 3 && !ok; attempt++) {
+        try {
+          const res = await axios.post(
+            WEBHOOK_URL,
+            { timestamp: new Date().toISOString(), lead },
+            { timeout: 30000 }
+          );
+          console.log(`📤 Sent: ${lead.full_name} (${res.status})`);
+          ok = true;
+        } catch (err) {
+          const status = err.response?.status;
+          console.error(`❌ Send failed (${attempt}/3) for ${lead.full_name}: ${err.message}`);
+
+          if (status === 404 || status === 410) {
+            throw new Error(`Webhook returned ${status}. Stopping before the move step.`);
+          }
+          await sleep(1000 * attempt);
+        }
       }
+
+      if (!ok) failedLeads.push(lead);
+      await sleep(500); // gentle pacing
     }
 
-    // 📁 Check/create folder
+    if (failedLeads.length > 0) {
+      throw new Error(`${failedLeads.length} lead(s) failed to send. Skipping the move step.`);
+    }
+
+    if (!MOVE_CONTACTS) {
+      console.log("ℹ️ MOVE_CONTACTS is off, leaving contacts where they are.");
+      return;
+    }
+
+    // ---------- Check / create the destination folder ----------
     await page.goto(CONTACTS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
     await page.waitForSelector("div.contacts-folder-nav-name", { timeout: 120000 });
 
@@ -348,37 +443,69 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
         try {
           await page.click("div[aria-haspopup='listbox']");
           await page.waitForSelector("div[role='option']", { timeout: 10000 });
-          await page.evaluate(() => {
+          await page.evaluate((parent) => {
             const option = [...document.querySelectorAll("div[role='option']")]
-              .find((el) => el.textContent.trim() === "Off Market");
+              .find((el) => el.textContent.trim() === parent);
             option?.click();
-          });
+          }, FOLDER_PARENT);
         } catch {}
-        try { await page.select("#layout", "8109"); } catch {}
+        try { await page.select("#layout", FOLDER_LAYOUT); } catch {}
         try { await page.click("button[type='submit']"); } catch {}
         await sleep(3000);
       } catch (err) {
         console.warn(`⚠️ Folder creation flow might have changed: ${err.message}`);
       }
     } else {
-      console.log(`✅ Folder "${folderName}" already exists — skipping creation.`);
+      console.log(`✅ Folder "${folderName}" already exists, skipping creation.`);
     }
 
-    // 📂 Move contacts
+    // ---------- Move contacts ----------
     await page.goto(CONTACTS_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
     await page.waitForSelector("tr[data-itemid]", { timeout: 120000 });
-    await page.waitForSelector("#master_checkbox", { timeout: 120000 });
-    await sleep(5000);
+    await page.waitForSelector("#master_checkbox", { timeout: 120000 }); // no visible:true, it can read as hidden with images/fonts blocked
+    await sleep(5000); // let all rows render and the select-all handler bind
 
-    // Select all contacts
-    const alreadyChecked = await page.$eval("#master_checkbox", el => !!el.checked).catch(() => false);
-    if (!alreadyChecked) {
-      await page.click("#master_checkbox");
+    const readChecked = () =>
+      page.$eval("#master_checkbox", (el) => !!el.checked).catch(() => false);
+
+    // Try three ways to tick it: real click, DOM click, label click
+    const attempts = [
+      async () => { await page.click("#master_checkbox"); },
+      async () => {
+        await page.evaluate(() => {
+          const cb = document.querySelector("#master_checkbox");
+          cb.scrollIntoView({ block: "center" });
+          cb.click();
+        });
+      },
+      async () => {
+        await page.evaluate(() => {
+          const cb = document.querySelector("#master_checkbox");
+          const label = cb.closest("label") || document.querySelector(`label[for="${cb.id}"]`);
+          (label || cb.parentElement).click();
+        });
+      }
+    ];
+
+    let isChecked = await readChecked();
+    for (const attempt of attempts) {
+      if (isChecked) break;
+      try { await attempt(); } catch (e) { console.warn("Checkbox attempt failed:", e.message); }
       await sleep(1000);
+      isChecked = await readChecked();
     }
 
-    const isChecked = await page.$eval("#master_checkbox", el => !!el.checked).catch(() => false);
     if (!isChecked) {
+      // Diagnostics so the next failure explains itself
+      const info = await page.evaluate(() => {
+        const cb = document.querySelector("#master_checkbox");
+        const r = cb?.getBoundingClientRect();
+        return {
+          rect: r ? { w: r.width, h: r.height, x: r.x, y: r.y } : null,
+          parentHtml: cb?.parentElement?.outerHTML?.slice(0, 500) || null
+        };
+      });
+      console.log("Master checkbox diagnostics:", JSON.stringify(info));
       throw new Error("Master checkbox was not checked.");
     }
 
@@ -437,7 +564,7 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
         if (!modal) return false;
 
         const buttons = Array.from(modal.querySelectorAll("button"));
-        const btn = buttons.find(b =>
+        const btn = buttons.find((b) =>
           /okay|ok|move|confirm/i.test((b.textContent || "").trim())
         );
 
@@ -468,7 +595,6 @@ const folderName = `Expired Leads Week of ${monday.getMonth() + 1}.${monday.getD
     // Give Vulcan7 time to process
     await sleep(4000);
     console.log(`✅ Move attempt finished for folder "${folderName}"`);
-
   } catch (err) {
     console.error("❌ Script Error:", err);
     try {
