@@ -1,29 +1,48 @@
-name: Daily Vulcan7 Off Market Job
+name: Vulcan7 Off Market to GHL (Carney)
 
 on:
+  schedule:
+    - cron: "7 8 * * 1-6"   # 8:07 AM Eastern, DST handled by the timezone field
+      timezone: "America/New_York"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Never let two runs overlap. A second run waits instead of cancelling the first,
+# so a run that is mid-send is never cut off.
 concurrency:
-  group: v7-daily-${{ github.ref }}
+  group: v7-offmarket-${{ github.ref }}
   cancel-in-progress: false
-  
+
 jobs:
   run:
     runs-on: ubuntu-latest
     env:
+      # Secrets (one set per repo)
       EMAIL: ${{ secrets.EMAIL }}
       PASSWORD: ${{ secrets.PASSWORD }}
-      WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+      GHL_TOKEN: ${{ secrets.GHL_TOKEN }}   # Private Integration token from THIS sub-account
+
+      # ---- GoHighLevel ----
+      GHL_LOCATION_ID: "s9jXxF73qQYtpcMfpN4o"
+      GHL_TAGS: "vulcan expired"          # comma separated, added to every contact
+      GHL_SOURCE: "vulcan"
+
+      # ---- Per-script settings ----
+      # CONTACTS_URL: leave out to use the default view for this list
+      MOVE_CONTACTS: "true"                 # "false" for the first test run, then "true"
+      FOLDER_NAME: "Expired Leads Week of {MONDAY}"   # {MONDAY} becomes month.day.year, e.g. "Expired Leads Week of 11.9.26"
+      LIST_LABEL: "Off Market"              # only used in log lines
+      FOLDER_PARENT: "Off Market"           # parent folder chosen when the script creates the folder
+      FOLDER_LAYOUT: "8109"
+      PHONE_CELL_ID: "143332"               # account specific column ids
+      EMAIL_CELL_ID: "143333"
+      # DEBUG_FIELDS: "1"                   # uncomment once to log detail-page labels for the first lead
+
       PUPPETEER_SKIP_DOWNLOAD: "true"
 
     steps:
-      - name: Compute ET date
-        id: date
-        run: echo "DATE_ET=$(TZ=America/New_York date +%Y-%m-%d)" >> $GITHUB_OUTPUT
-
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -32,12 +51,6 @@ jobs:
 
       - name: Install deps
         run: npm install --no-audit --no-fund
-
-      - name: Restore dedupe cache (today only)
-        uses: actions/cache@v4
-        with:
-          path: sent-leads-cache-offmarket.json
-          key: offmarket-cache-${{ steps.date.outputs.DATE_ET }}
 
       - name: Use preinstalled Chrome
         run: echo "PUPPETEER_EXECUTABLE_PATH=$(which google-chrome)" >> $GITHUB_ENV
@@ -50,8 +63,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: debug-artifacts
-          path: |
-            failure.png
-            failure_move.png
-            sent-leads-cache-offmarket.json
+          path: failure*.png
           if-no-files-found: ignore
