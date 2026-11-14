@@ -33,7 +33,7 @@ const GHL_TOKEN = process.env.GHL_TOKEN;                 // Private Integration 
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;     // sub-account (location) id
 const GHL_SOURCE = process.env.GHL_SOURCE || "vulcan";
 // Comma separated. Added to the contact, existing tags are kept.
-const GHL_TAGS = (process.env.GHL_TAGS || "vulcan carney off market").split(",").map((t) => t.trim()).filter(Boolean);
+const GHL_TAGS = (process.env.GHL_TAGS || "vulcan expired").split(",").map((t) => t.trim()).filter(Boolean);
 const CONTACTS_URL = process.env.CONTACTS_URL ||
   "https://www.vulcan7dialer.com/cm/index#params/dmlld19pZD05ODEzOCZwYWdlPTE=";
 
